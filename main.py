@@ -2,6 +2,7 @@ from typing import Tuple
 import unittest
 from dataclasses import dataclass
 import random
+from hashlib import sha256
 
 # Goal: demonstrate threshold signing end to end in the simplest way possible
 # 1. DKG
@@ -90,6 +91,9 @@ class Number:
     def __neg__(self) -> "Number":
         return Number(0) - self
 
+def rand_secret() -> "Number":
+    return Number(random.randrange(1, generator.n.num))
+
 
 @dataclass(frozen=True)
 class Curve:
@@ -124,7 +128,7 @@ class Point:
 
     @staticmethod
     def inf() -> "Point":
-        return Point(secp256k1, Number(0), Number(0))
+        return Point(secp256k1, Number(None), Number(None))
 
     def __add__(self, other: "Point") -> "Point":
         # P + 0 = 0 + P
@@ -133,27 +137,31 @@ class Point:
         if other == Point.inf():
             return self
         # P + (-P) = 0
-        if self.x == other.x and self.y == -other.y:
+        if self.x == other.x and self.y != other.y:
             return Point.inf()
         # slope
         if self.x == other.x:
-            m = (Number(3) * self.x ** Number(2) + self.curve.a) // (Number(2) * self.y)
+            m = (Number(3) * (self.x ** Number(2)) + self.curve.a) // (Number(2) * self.y)
         else:
-            m = (other.y - self.y) // (other.x - self.x)
+            m = (self.y - other.y) // (self.x - other.x)
         x = m ** Number(2) - self.x - other.x
         y = -(m * (x - self.x) + self.y)
         return Point(self.curve, x, y)
 
-    def __mul__(self, k: Number) -> "Point":
-        assert isinstance(k, Number) and k.num >= 0
+    def __mul__(self, k_num: Number) -> "Point":
+        k = k_num.num
+        assert isinstance(k, int) and k >= 0
         result = Point.inf()
         append = self
-        while k.num > 0:
-            if k.num & 1:
+        while k > 0:
+            if k & 1:
                 result += append
             append += append
-            k = Number(k.num >> 1)
+            k >>=1
         return result
+
+    def to_bytes(self) -> bytes:
+        return bytes([2 if self.y.num % 2 == 0 else 3]) + int.to_bytes(self.x.num, 32, "big") # big endian
 
 
 G = Point(
@@ -175,6 +183,39 @@ generator = Generator(
     n=Number(0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEBAAEDCE6AF48A03BBFD25E8CD0364141),
 )
 
+@dataclass
+class Signature:
+    s: Number
+    e: Number
+
+def sign(sk: Number, msg: bytes) -> Signature:
+    """Returns (s, e) where
+        r = k * G
+        e = H(r || msg)
+        s = k + sk * e
+    """
+    k = rand_secret()
+    r = G * k
+    print("r:", r.to_bytes())
+    print("r.x:", r.x.num)
+    e_bytes = sha256(r.to_bytes() + msg).digest()
+    print("e_bytes:", e_bytes)
+    e = Number(int.from_bytes(e_bytes, "big"))
+    s = k + sk * e
+    return Signature(s, e), k
+
+def verify(sig: Signature, pk: Point, msg: bytes) -> bool:
+    # G * s = G * (k + sk * e)
+    # pk * e = G * (-sk * e)
+    # r = G * k
+    r = G * sig.s + pk * sig.e
+    print("verify r:", r.to_bytes())
+    print("verify r.x:", r.x.num)
+    e_bytes = sha256(r.to_bytes() + msg).digest()
+    print("verify e_bytes:", e_bytes)
+    e = Number(int.from_bytes(e_bytes, "big"))
+    print("verify e:", e)
+    return sig.e == e
 
 class TestThresholdSigning(unittest.TestCase):
     def test_curve(self):
@@ -191,6 +232,43 @@ class TestThresholdSigning(unittest.TestCase):
         assert secp256k1.check(pk.x, pk.y)
 
         assert G * Number(2) == G + G
+        assert G * Number(3) == G + G + G
+
+        assert -Number(2) == Number(0) - Number(2)
+        print((-Number(2)).num)
+        print((Number(2)).num)
+        print((Number(2).field.p))
+
+        assert G * Number(2) * Number(3) == G * Number(6)
+        sk = rand_secret()
+        sk2 = rand_secret()
+        assert sk + sk2 == sk2 + sk
+        print("sk:", sk.num)
+        print("sk2:", sk2.num)
+        print("sk + sk2:", (sk + sk2).num)
+        print("sk2 + sk:", (sk2 + sk).num)
+        print("G * sk:", (G * sk).x.num)
+        print("G * sk2:", (G * sk2).x.num)
+        print("G * sk + G * sk2:", (G * sk + G * sk2).x.num)
+        print("G * (sk + sk2):", (G * (sk + sk2)).x.num)
+        assert G * sk + G * sk2 == G * (sk + sk2)
+
+
+    # def test_sign_verify(self):
+    #     sk = rand_secret()
+    #     pk = G * sk
+    #     verify_pk = G * -sk
+    #     msg = b"What do cryptographers do when they sleep?"
+    #     sig, k = sign(sk, msg)
+    #     print("s:", sig.s.num)
+    #     print("e:", sig.e.num)
+    #     assert sig.s - k == sk * sig.e
+    #     assert sig.s + (-sk * sig.e) == k
+    #     assert G * (sig.s - k) == G * (sk * sig.e)
+    #     assert verify_pk * sig.e == G * (-sk * sig.e)
+    #     assert G * (sig.s + (-sk * sig.e)) == G * k
+    #     assert G * sig.s + G * (-sk * sig.e) == G * k
+    #     assert verify(sig, verify_pk, msg)
 
 
 if __name__ == "__main__":

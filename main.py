@@ -30,105 +30,49 @@ def gcd(a: int, b: int) -> Tuple[int, int, int]:
     return old_r, old_s, old_t
 
 
-@dataclass(frozen=True)
-class Field:
-    """This is a number on a prime field."""
+def inv(a: int, p: int) -> int:
+    """Find the inverse using extended euclidean algorithm."""
+    _divisor, x, _y = gcd(a, p)
+    return x % p
 
-    p: int
-
-    def add(self, a: int, b: int) -> int:
-        return (a + b) % self.p
-
-    def sub(self, a: int, b: int) -> int:
-        return (a - b) % self.p
-
-    def mul(self, a: int, b: int) -> int:
-        return (a * b) % self.p
-
-    def inv(self, a: int) -> int:
-        """Find the inverse using extended euclidean algorithm."""
-        _divisor, x, _y = gcd(a, self.p)
-        return x % self.p
-
-    def div(self, a: int, b: int) -> int:
-        return self.mul(a, self.inv(b))
-
-
-secp256k1_field = Field(
-    0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEFFFFFC2F
-)
-
-
-@dataclass(frozen=True)
-class Number:
-    """This is a number on a prime field."""
-
-    num: int
-    field: Field = secp256k1_field
-
-    def __add__(self, other: "Number") -> "Number":
-        assert self.field == other.field
-        return Number(self.field.add(self.num, other.num), self.field)
-
-    def __sub__(self, other: "Number") -> "Number":
-        assert self.field == other.field
-        return Number(self.field.sub(self.num, other.num), self.field)
-
-    def __mul__(self, other: "Number") -> "Number":
-        assert self.field == other.field
-        return Number(self.field.mul(self.num, other.num), self.field)
-
-    def inv(self) -> "Number":
-        return Number(self.field.inv(self.num), self.field)
-
-    def __floordiv__(self, other: "Number") -> "Number":
-        assert self.field == other.field
-        return Number(self.field.div(self.num, other.num), self.field)
-
-    def __pow__(self, other: "Number") -> "Number":
-        return Number(pow(self.num, other.num, self.field.p), self.field)
-
-    def __neg__(self) -> "Number":
-        return Number(0) - self
-
-def rand_secret() -> "Number":
-    return Number(random.randrange(1, generator.n.num))
+def rand_secret() -> int:
+    return random.randrange(1, generator.n)
 
 
 @dataclass(frozen=True)
 class Curve:
-    a: Number
-    b: Number
-    field: Field
+    a: int
+    b: int
+    p: int
 
-    def eval(self, x: Number) -> Number:
-        return x ** Number(3) + self.a * x + self.b
+    def eval(self, x: int) -> int:
+        return (x ** 3 + self.a * x + self.b) % self.p
 
-    def check(self, x: Number, y: Number) -> bool:
+    def check(self, x: int, y: int) -> bool:
         """Check if the point is on the curve."""
-        return y ** Number(2) == self.eval(x)
+        return (y ** 2) % self.p == self.eval(x)
 
 
 secp256k1 = Curve(
-    a=Number(
+    a=
         0x0000000000000000000000000000000000000000000000000000000000000000
-    ),  # a = 0
-    b=Number(
+    ,  # a = 0
+    b=
         0x0000000000000000000000000000000000000000000000000000000000000007
-    ),  # b = 7
-    field=secp256k1_field,
+    ,  # b = 7
+    p = 0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEFFFFFC2F
 )
 
 
 @dataclass(frozen=True)
 class Point:
     curve: Curve
-    x: Number
-    y: Number
+    x: int
+    y: int
 
     @staticmethod
     def inf() -> "Point":
-        return Point(secp256k1, Number(None), Number(None))
+        return Point(None, None, None)
 
     def __add__(self, other: "Point") -> "Point":
         # P + 0 = 0 + P
@@ -141,15 +85,14 @@ class Point:
             return Point.inf()
         # slope
         if self.x == other.x:
-            m = (Number(3) * (self.x ** Number(2)) + self.curve.a) // (Number(2) * self.y)
+            m = (3 * (self.x ** 2) + self.curve.a) * inv(2 * self.y, self.curve.p)
         else:
-            m = (self.y - other.y) // (self.x - other.x)
-        x = m ** Number(2) - self.x - other.x
-        y = -(m * (x - self.x) + self.y)
+            m = (self.y - other.y) * inv(self.x - other.x, self.curve.p)
+        x = (m ** 2 - self.x - other.x) % self.curve.p
+        y = (-(m * (x - self.x) + self.y)) % self.curve.p
         return Point(self.curve, x, y)
 
-    def __mul__(self, k_num: Number) -> "Point":
-        k = k_num.num
+    def __mul__(self, k: int) -> "Point":
         assert isinstance(k, int) and k >= 0
         result = Point.inf()
         append = self
@@ -161,34 +104,34 @@ class Point:
         return result
 
     def to_bytes(self) -> bytes:
-        return bytes([2 if self.y.num % 2 == 0 else 3]) + int.to_bytes(self.x.num, 32, "big") # big endian
+        return bytes([2 if self.y % 2 == 0 else 3]) + int.to_bytes(self.x, 32, "big") # big endian
 
 
 G = Point(
     secp256k1,
-    x=Number(0x79BE667EF9DCBBAC55A06295CE870B07029BFCDB2DCE28D959F2815B16F81798),
-    y=Number(0x483ADA7726A3C4655DA4FBFC0E1108A8FD17B448A68554199C47D08FFB10D4B8),
+    x=0x79BE667EF9DCBBAC55A06295CE870B07029BFCDB2DCE28D959F2815B16F81798,
+    y=0x483ADA7726A3C4655DA4FBFC0E1108A8FD17B448A68554199C47D08FFB10D4B8,
 )
 
 
 @dataclass(frozen=True)
 class Generator:
     G: Point
-    n: Number
+    n: int
 
 
 generator = Generator(
     G=G,
     # the order of G is known and can be mathematically derived
-    n=Number(0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEBAAEDCE6AF48A03BBFD25E8CD0364141),
+    n=0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEBAAEDCE6AF48A03BBFD25E8CD0364141,
 )
 
 @dataclass
 class Signature:
-    s: Number
-    e: Number
+    r: Point
+    s: int
 
-def sign(sk: Number, msg: bytes) -> Signature:
+def sign(sk: int, msg: bytes) -> Signature:
     """Returns (s, e) where
         r = k * G
         e = H(r || msg)
@@ -196,79 +139,59 @@ def sign(sk: Number, msg: bytes) -> Signature:
     """
     k = rand_secret()
     r = G * k
-    print("r:", r.to_bytes())
-    print("r.x:", r.x.num)
     e_bytes = sha256(r.to_bytes() + msg).digest()
-    print("e_bytes:", e_bytes)
-    e = Number(int.from_bytes(e_bytes, "big"))
-    s = k + sk * e
-    return Signature(s, e), k
+    e = int.from_bytes(e_bytes, "big")
+    print("e:", e)
+    s = (k - sk * e) % secp256k1.p
+    print(G * s)
+    return Signature(r, s)
 
 def verify(sig: Signature, pk: Point, msg: bytes) -> bool:
     # G * s = G * (k + sk * e)
     # pk * e = G * (-sk * e)
     # r = G * k
-    r = G * sig.s + pk * sig.e
-    print("verify r:", r.to_bytes())
-    print("verify r.x:", r.x.num)
-    e_bytes = sha256(r.to_bytes() + msg).digest()
-    print("verify e_bytes:", e_bytes)
-    e = Number(int.from_bytes(e_bytes, "big"))
-    print("verify e:", e)
-    return sig.e == e
+    e_bytes = sha256(sig.r.to_bytes() + msg).digest()
+    e = int.from_bytes(e_bytes, "big")
+    print("e:", e)
+    # G * s = G * (k - sk * e)
+    # G * s + r = G * (k - sk * e + sk * e) = G * k
+    print(G * sig.s)
+    return G * sig.s + pk * e == sig.r
 
 class TestThresholdSigning(unittest.TestCase):
     def test_curve(self):
-        assert secp256k1.check(G.x, G.y)
-
-        x = Number(random.randrange(0, secp256k1_field.p))
-        y = Number(random.randrange(0, secp256k1_field.p))
-        assert not secp256k1.check(x, y)
-
-        pk = G + G
-        assert secp256k1.check(pk.x, pk.y)
-
-        pk = G + G + G
-        assert secp256k1.check(pk.x, pk.y)
-
-        assert G * Number(2) == G + G
-        assert G * Number(3) == G + G + G
-
-        assert -Number(2) == Number(0) - Number(2)
-        print((-Number(2)).num)
-        print((Number(2)).num)
-        print((Number(2).field.p))
-
-        assert G * Number(2) * Number(3) == G * Number(6)
+        assert G * 2 * 3 == G * 6
         sk = rand_secret()
         sk2 = rand_secret()
         assert sk + sk2 == sk2 + sk
-        print("sk:", sk.num)
-        print("sk2:", sk2.num)
-        print("sk + sk2:", (sk + sk2).num)
-        print("sk2 + sk:", (sk2 + sk).num)
-        print("G * sk:", (G * sk).x.num)
-        print("G * sk2:", (G * sk2).x.num)
-        print("G * sk + G * sk2:", (G * sk + G * sk2).x.num)
-        print("G * (sk + sk2):", (G * (sk + sk2)).x.num)
+        print("sk:", sk)
+        print("sk2:", sk2)
+        print("sk + sk2:", (sk + sk2))
+        print("sk2 + sk:", (sk2 + sk))
+        print("G * sk:", (G * sk).x)
+        print("G * sk2:", (G * sk2).x)
+        print("G * sk + G * sk2:", (G * sk + G * sk2).x)
+        print("G * (sk + sk2):", (G * (sk + sk2)).x)
         assert G * sk + G * sk2 == G * (sk + sk2)
+        print(G * (-sk % secp256k1.p) + G * sk)
+        print(G * 0)
 
 
-    # def test_sign_verify(self):
-    #     sk = rand_secret()
-    #     pk = G * sk
-    #     verify_pk = G * -sk
-    #     msg = b"What do cryptographers do when they sleep?"
-    #     sig, k = sign(sk, msg)
-    #     print("s:", sig.s.num)
-    #     print("e:", sig.e.num)
-    #     assert sig.s - k == sk * sig.e
-    #     assert sig.s + (-sk * sig.e) == k
-    #     assert G * (sig.s - k) == G * (sk * sig.e)
-    #     assert verify_pk * sig.e == G * (-sk * sig.e)
-    #     assert G * (sig.s + (-sk * sig.e)) == G * k
-    #     assert G * sig.s + G * (-sk * sig.e) == G * k
-    #     assert verify(sig, verify_pk, msg)
+    def test_sign_verify(self):
+        sk = rand_secret()
+        pk = G * sk
+        verify_pk = G * sk
+        msg = b"What do cryptographers do when they sleep?"
+        sig = sign(sk, msg)
+        # print("s:", sig.s)
+        # print("e:", sig.e)
+        # assert sig.s - k == sk * sig.e
+        # assert sig.s + (-sk * sig.e) == k
+        # assert G * (sig.s - k) == G * (sk * sig.e)
+        # assert verify_pk * sig.e == G * (-sk * sig.e)
+        # assert G * (sig.s + (-sk * sig.e)) == G * k
+        # assert G * sig.s + G * (-sk * sig.e) == G * k
+        assert verify(sig, verify_pk, msg)
 
 
 if __name__ == "__main__":

@@ -142,7 +142,7 @@ def sign(sk: int, msg: bytes) -> Signature:
     e_bytes = sha256(r.to_bytes() + msg).digest()
     e = int.from_bytes(e_bytes, "big")
     print("e:", e)
-    s = (k - sk * e) % secp256k1.p
+    s = (k - sk * e) % generator.n
     print(G * s)
     return Signature(r, s)
 

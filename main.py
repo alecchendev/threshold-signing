@@ -35,6 +35,7 @@ def inv(a: int, p: int) -> int:
     _divisor, x, _y = gcd(a, p)
     return x % p
 
+
 def rand_secret() -> int:
     return random.randrange(1, generator.n)
 
@@ -46,21 +47,17 @@ class Curve:
     p: int
 
     def eval(self, x: int) -> int:
-        return (x ** 3 + self.a * x + self.b) % self.p
+        return (x**3 + self.a * x + self.b) % self.p
 
     def check(self, x: int, y: int) -> bool:
         """Check if the point is on the curve."""
-        return (y ** 2) % self.p == self.eval(x)
+        return (y**2) % self.p == self.eval(x)
 
 
 secp256k1 = Curve(
-    a=
-        0x0000000000000000000000000000000000000000000000000000000000000000
-    ,  # a = 0
-    b=
-        0x0000000000000000000000000000000000000000000000000000000000000007
-    ,  # b = 7
-    p = 0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEFFFFFC2F
+    a=0x0000000000000000000000000000000000000000000000000000000000000000,  # a = 0
+    b=0x0000000000000000000000000000000000000000000000000000000000000007,  # b = 7
+    p=0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEFFFFFC2F,
 )
 
 
@@ -72,9 +69,11 @@ class Point:
 
     @staticmethod
     def inf() -> "Point":
-        return Point(None, None, None)
+        return Point(secp256k1, 0, 0)
 
     def __add__(self, other: "Point") -> "Point":
+        # Edge cases
+
         # P + 0 = 0 + P
         if self == Point.inf():
             return other
@@ -83,16 +82,28 @@ class Point:
         # P + (-P) = 0
         if self.x == other.x and self.y != other.y:
             return Point.inf()
-        # slope
+
+        # Find the slope of the line between the two current points.
         if self.x == other.x:
-            m = (3 * (self.x ** 2) + self.curve.a) * inv(2 * self.y, self.curve.p)
+            # Derivative of the curve at this point, i.e. tangent line = 3x^2/2y
+            # We cannot do rise over run because the denominator is 0
+            m = (3 * (self.x**2) + self.curve.a) * inv(2 * self.y, self.curve.p)
         else:
+            # Slope of the line connecting the two points, i.e. rise over run
             m = (self.y - other.y) * inv(self.x - other.x, self.curve.p)
-        x = (m ** 2 - self.x - other.x) % self.curve.p
+
+        # To find the new point, we find the intersection of the line with the curve.
+        # I.e. the solution to the set of equations: y^2=x^3+7 and y=mx+b
+        # This results in the following: x=m^2-x_0-x_1 and y=m*(x-x_0)+y_0
+        # And we take the negative of y because that's how elliptic curve addition
+        # is defined.
+        x = (m**2 - self.x - other.x) % self.curve.p
         y = (-(m * (x - self.x) + self.y)) % self.curve.p
         return Point(self.curve, x, y)
 
     def __mul__(self, k: int) -> "Point":
+        # More efficient way of doing multiplication with large numbers,
+        # i.e. double and add
         assert isinstance(k, int) and k >= 0
         result = Point.inf()
         append = self
@@ -100,11 +111,13 @@ class Point:
             if k & 1:
                 result += append
             append += append
-            k >>=1
+            k >>= 1
         return result
 
     def to_bytes(self) -> bytes:
-        return bytes([2 if self.y % 2 == 0 else 3]) + int.to_bytes(self.x, 32, "big") # big endian
+        return bytes([2 if self.y % 2 == 0 else 3]) + int.to_bytes(
+            self.x, 32, "big"
+        )  # big endian
 
 
 G = Point(
@@ -126,72 +139,58 @@ generator = Generator(
     n=0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEBAAEDCE6AF48A03BBFD25E8CD0364141,
 )
 
+
 @dataclass
 class Signature:
     r: Point
     s: int
 
+
 def sign(sk: int, msg: bytes) -> Signature:
     """Returns (s, e) where
-        r = k * G
-        e = H(r || msg)
-        s = k + sk * e
+    r = k * G
+    e = H(r || msg)
+    s = k - sk * e
     """
     k = rand_secret()
     r = G * k
     e_bytes = sha256(r.to_bytes() + msg).digest()
     e = int.from_bytes(e_bytes, "big")
-    print("e:", e)
     s = (k - sk * e) % generator.n
-    print(G * s)
     return Signature(r, s)
 
+
 def verify(sig: Signature, pk: Point, msg: bytes) -> bool:
-    # G * s = G * (k + sk * e)
-    # pk * e = G * (-sk * e)
-    # r = G * k
+    """Returns whether the signature (r, s) is valid with the
+    provided public key (pk) for the message, i.e.
+    e = H(r || msg)
+    G * s + pk * e == r
+    """
+    # Spelled out:
+    # G * s = G * (k - sk * e)
+    # pk * e = G * (sk * e)
+    # G * s + pk * e = G * (k - sk * e) + G * (sk * e)
+    # = G * k = r
     e_bytes = sha256(sig.r.to_bytes() + msg).digest()
     e = int.from_bytes(e_bytes, "big")
-    print("e:", e)
-    # G * s = G * (k - sk * e)
-    # G * s + r = G * (k - sk * e + sk * e) = G * k
-    print(G * sig.s)
     return G * sig.s + pk * e == sig.r
+
 
 class TestThresholdSigning(unittest.TestCase):
     def test_curve(self):
+        assert secp256k1.check(G.x, G.y)
         assert G * 2 * 3 == G * 6
         sk = rand_secret()
         sk2 = rand_secret()
         assert sk + sk2 == sk2 + sk
-        print("sk:", sk)
-        print("sk2:", sk2)
-        print("sk + sk2:", (sk + sk2))
-        print("sk2 + sk:", (sk2 + sk))
-        print("G * sk:", (G * sk).x)
-        print("G * sk2:", (G * sk2).x)
-        print("G * sk + G * sk2:", (G * sk + G * sk2).x)
-        print("G * (sk + sk2):", (G * (sk + sk2)).x)
         assert G * sk + G * sk2 == G * (sk + sk2)
-        print(G * (-sk % secp256k1.p) + G * sk)
-        print(G * 0)
-
 
     def test_sign_verify(self):
         sk = rand_secret()
         pk = G * sk
-        verify_pk = G * sk
         msg = b"What do cryptographers do when they sleep?"
         sig = sign(sk, msg)
-        # print("s:", sig.s)
-        # print("e:", sig.e)
-        # assert sig.s - k == sk * sig.e
-        # assert sig.s + (-sk * sig.e) == k
-        # assert G * (sig.s - k) == G * (sk * sig.e)
-        # assert verify_pk * sig.e == G * (-sk * sig.e)
-        # assert G * (sig.s + (-sk * sig.e)) == G * k
-        # assert G * sig.s + G * (-sk * sig.e) == G * k
-        assert verify(sig, verify_pk, msg)
+        assert verify(sig, pk, msg)
 
 
 if __name__ == "__main__":

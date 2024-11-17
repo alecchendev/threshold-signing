@@ -160,6 +160,33 @@ def sign(sk: int, msg: bytes) -> Signature:
     return Signature(r, s)
 
 
+def sign_with_nonce(k: int, sk: int, msg: bytes) -> Signature:
+    """Returns (s, e) where
+    r = k * G
+    e = H(r || msg)
+    s = k - sk * e
+    """
+    r = G * k
+    e_bytes = sha256(r.to_bytes() + msg).digest()
+    e = int.from_bytes(e_bytes, "big")
+    s = (k - sk * e) % generator.n
+    return Signature(r, s)
+
+
+def sign_with_nonce_and_agg_nonce(
+    k: int, r_agg: Point, sk: int, msg: bytes
+) -> Signature:
+    """Returns (s, e) where
+    r = k * G
+    e = H(r || msg)
+    s = k - sk * e
+    """
+    e_bytes = sha256(r_agg.to_bytes() + msg).digest()
+    e = int.from_bytes(e_bytes, "big")
+    s = (k - sk * e) % generator.n
+    return Signature(r_agg, s)
+
+
 def verify(sig: Signature, pk: Point, msg: bytes) -> bool:
     """Returns whether the signature (r, s) is valid with the
     provided public key (pk) for the message, i.e.
@@ -231,6 +258,145 @@ class TestThresholdSigning(unittest.TestCase):
         assert verify(sig2, pk, msg2)
         solved_sk = sk_from_nonce_reuse(msg1, sig1, msg2, sig2)
         assert solved_sk == sk
+
+    def test_threshold_signing(self):
+        # 2/2 threshold signing
+        # Kinda pointless to do threshold here but whatever
+        sk1 = rand_secret()
+        sk2 = rand_secret()
+        pk1 = G * sk1
+        pk2 = G * sk2
+        m1 = rand_secret()
+        m2 = rand_secret()
+        line1 = lambda x: (m1 * x + sk1) % generator.n
+        line2 = lambda x: (m2 * x + sk2) % generator.n
+        idx1 = 1
+        idx2 = 2
+        y11 = line1(idx1)
+        y12 = line1(idx2)
+        y21 = line2(idx1)
+        y22 = line2(idx2)
+        share1 = y11 + y21
+        share2 = y12 + y22
+        # (x - x_m) / (x_j - x_m) * y_j
+        lambda1 = (0 - idx2) * inv(idx1 - idx2, generator.n) * share1 % generator.n
+        lambda2 = (0 - idx1) * inv(idx2 - idx1, generator.n) * share2 % generator.n
+        sk_agg = (lambda1 + lambda2) % generator.n
+        assert sk_agg == (sk1 + sk2) % generator.n
+        assert lambda1 != sk1 and lambda1 != sk2
+        assert lambda2 != sk1 and lambda2 != sk2
+        pk_agg = G * lambda1 + G * lambda2
+        assert pk_agg == pk1 + pk2
+
+        # Signing
+        # e = H((k1 + k2) || msg)
+        # s1 = k1 + sk1 * e
+        # s2 = k2 + sk2 * e
+        # s3 = (k1 + k2) + (sk1 + sk2) * e
+        msg = b"Hello"
+        k1 = rand_secret()
+        k2 = rand_secret()
+        r1 = G * k1
+        r2 = G * k2
+        r_agg = r1 + r2
+        sig1 = sign_with_nonce_and_agg_nonce(k1, r_agg, sk1, msg)
+        sig2 = sign_with_nonce_and_agg_nonce(k2, r_agg, sk2, msg)
+        sig_agg = Signature(r_agg, sig1.s + sig2.s)
+        assert verify(sig_agg, pk_agg, msg)
+
+        # Signing with the threshold key shares
+        k1 = rand_secret()
+        k2 = rand_secret()
+        r1 = G * k1
+        r2 = G * k2
+        r_agg = r1 + r2
+        sig1 = sign_with_nonce_and_agg_nonce(k1, r_agg, lambda1, msg)
+        sig2 = sign_with_nonce_and_agg_nonce(k2, r_agg, lambda2, msg)
+        sig_agg = Signature(r_agg, sig1.s + sig2.s)
+        assert verify(sig_agg, pk_agg, msg)
+
+    def test_threshold_signing2(self):
+        # 2/3 threshold signing
+        sk1 = rand_secret()
+        sk2 = rand_secret()
+        sk3 = rand_secret()
+        pk1 = G * sk1
+        pk2 = G * sk2
+        pk3 = G * sk3
+        m1 = rand_secret()
+        m2 = rand_secret()
+        m3 = rand_secret()
+        line1 = lambda x: (m1 * x + sk1) % generator.n
+        line2 = lambda x: (m2 * x + sk2) % generator.n
+        line3 = lambda x: (m3 * x + sk3) % generator.n
+        idx1 = 1
+        idx2 = 2
+        idx3 = 3
+        y11 = line1(idx1)
+        y12 = line1(idx2)
+        y13 = line1(idx3)
+        y21 = line2(idx1)
+        y22 = line2(idx2)
+        y23 = line2(idx3)
+        y31 = line3(idx1)
+        y32 = line3(idx2)
+        y33 = line3(idx3)
+        share1 = y11 + y21 + y31
+        share2 = y12 + y22 + y32
+        share3 = y13 + y23 + y33
+        # Rederiving the shared secret
+        lambda1 = (
+            (
+                (0 - idx2)
+                * inv(idx1 - idx2, generator.n)
+                * (0 - idx3)
+                * inv(idx1 - idx3, generator.n)
+            )
+            * share1
+            % generator.n
+        )
+        lambda2 = (
+            (
+                (0 - idx1)
+                * inv(idx2 - idx1, generator.n)
+                * (0 - idx3)
+                * inv(idx2 - idx3, generator.n)
+            )
+            * share2
+            % generator.n
+        )
+        lambda3 = (
+            (
+                (0 - idx1)
+                * inv(idx3 - idx1, generator.n)
+                * (0 - idx2)
+                * inv(idx3 - idx2, generator.n)
+            )
+            * share3
+            % generator.n
+        )
+        sk_agg = (lambda1 + lambda2 + lambda3) % generator.n
+        assert sk_agg == (sk1 + sk2 + sk3) % generator.n
+
+        # Proof you can do it with only 2 of the 3 shares!
+        lambda12 = (0 - idx2) * inv(idx1 - idx2, generator.n) * share1 % generator.n
+        lambda21 = (0 - idx1) * inv(idx2 - idx1, generator.n) * share2 % generator.n
+        sk_agg = (lambda12 + lambda21) % generator.n
+        assert sk_agg == (sk1 + sk2 + sk3) % generator.n
+
+        # Signing
+        msg = b"Hello"
+        k1 = rand_secret()
+        k2 = rand_secret()
+        r1 = G * k1
+        r2 = G * k2
+        r_agg = r1 + r2
+        sig1 = sign_with_nonce_and_agg_nonce(k1, r_agg, lambda12, msg)
+        sig2 = sign_with_nonce_and_agg_nonce(k2, r_agg, lambda21, msg)
+        sig_agg = Signature(r_agg, sig1.s + sig2.s)
+        pk_agg = G * lambda1 + G * lambda2 + G * lambda3
+        assert pk_agg == pk1 + pk2 + pk3
+        assert verify(sig_agg, pk_agg, msg)
 
 
 if __name__ == "__main__":

@@ -176,6 +176,25 @@ def verify(sig: Signature, pk: Point, msg: bytes) -> bool:
     return G * sig.s + pk * e == sig.r
 
 
+def sk_from_nonce_reuse(
+    msg1: bytes, sig1: Signature, msg2: bytes, sig2: Signature
+) -> int:
+    assert sig1.r == sig2.r
+    r = sig1.r
+    e1_bytes = sha256(r.to_bytes() + msg1).digest()
+    e1 = int.from_bytes(e1_bytes, "big")
+    e2_bytes = sha256(r.to_bytes() + msg2).digest()
+    e2 = int.from_bytes(e2_bytes, "big")
+    # sig1.s = k - sk * e1
+    # sig2.s = k - sk * e2
+    # sig1.s - sig2.s = (k - sk * e1) - (k - sk * e2)
+    # = sk * e2 - sk * e1
+    # = sk * (e2 - e1)
+    # sk = (sig1.s - sig2.s) / (e2 - e1)
+    sk = (sig1.s - sig2.s) * inv(e2 - e1, generator.n) % generator.n
+    return sk
+
+
 class TestThresholdSigning(unittest.TestCase):
     def test_curve(self):
         assert secp256k1.check(G.x, G.y)
@@ -191,6 +210,27 @@ class TestThresholdSigning(unittest.TestCase):
         msg = b"What do cryptographers do when they sleep?"
         sig = sign(sk, msg)
         assert verify(sig, pk, msg)
+
+    def sign_with_nonce(self, k: int, sk: int, msg: bytes) -> Signature:
+        """Same signing method, but takes a nonce as a parameter."""
+        r = G * k
+        e_bytes = sha256(r.to_bytes() + msg).digest()
+        e = int.from_bytes(e_bytes, "big")
+        s = (k - sk * e) % generator.n
+        return Signature(r, s)
+
+    def test_nonce_reuse(self):
+        sk = rand_secret()
+        pk = G * sk
+        k = rand_secret()
+        msg1 = b"Hello"
+        sig1 = self.sign_with_nonce(k, sk, msg1)
+        assert verify(sig1, pk, msg1)
+        msg2 = b"Goodbye"
+        sig2 = self.sign_with_nonce(k, sk, msg2)
+        assert verify(sig2, pk, msg2)
+        solved_sk = sk_from_nonce_reuse(msg1, sig1, msg2, sig2)
+        assert solved_sk == sk
 
 
 if __name__ == "__main__":

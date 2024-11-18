@@ -5,10 +5,7 @@ from dataclasses import dataclass
 import random
 from hashlib import sha256
 
-# Goal: demonstrate threshold signing end to end in the simplest way possible
-# 1. DKG
-# 2. Signing
-# 3. Verification?
+# Crypto/math primitives
 
 
 def gcd(a: int, b: int) -> Tuple[int, int, int]:
@@ -137,6 +134,8 @@ generator = Generator(
     n=0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEBAAEDCE6AF48A03BBFD25E8CD0364141,
 )
 
+# Basic schnorr signature
+
 
 @dataclass
 class Signature:
@@ -203,6 +202,9 @@ def sk_from_nonce_reuse(
     return sk
 
 
+# Threshold signing
+
+
 def eval_polynomial(coeffs: List[int], x: int) -> int:
     """Evaluates a polynomial of degree len(coeffs)-1 at x.
 
@@ -237,10 +239,6 @@ class ThresholdSigner:
 
     # Post DKG
 
-    def get_share(self) -> int:
-        assert self.idx is not None and self.share is not None
-        return self.share
-
     def compute_lambda(self, other_idxs: List[int]) -> int:
         assert self.idx is not None and self.share is not None
         # Lagrange interpolation: https://en.wikipedia.org/wiki/Lagrange_polynomial
@@ -257,13 +255,27 @@ class ThresholdSigner:
 def get_signer_idxs(signers: List[ThresholdSigner]) -> List[int]:
     return [
         idx
-        for _, idx in sorted(zip(signers, [1, 2, 3]), key=lambda x: x[0].pk.to_bytes())
+        for _, idx in sorted(
+            zip(signers, range(1, len(signers) + 1)), key=lambda x: x[0].pk.to_bytes()
+        )
     ]
+
+
+def distribute_shares(signers: List[ThresholdSigner]) -> None:
+    idxs = get_signer_idxs(signers)
+    for idx, signer in zip(idxs, signers):
+        partial_shares = [
+            other_signer.compute_partial_share(idx)
+            for other_signer in signers
+            if other_signer != signer
+        ]
+        signer.set_share(idx, partial_shares)
 
 
 def threshold_sign(
     signers: List[ThresholdSigner], signer_idxs: List[int], msg: bytes
 ) -> Signature:
+    assert len(signers) == len(signer_idxs)
     # TODO: do we need to tweak with our pubkey somewhere?
     nonces = [rand_secret() for _ in signers]
     agg_nonce = sum((G * k for k in nonces), Point.inf())
@@ -297,14 +309,6 @@ class TestThresholdSigning(unittest.TestCase):
         msg = b"Which cryptography struggled with sleep apnea?"
         sig = sign_schnorr(sk, msg)
         assert verify_schnorr(sig, pk, msg)
-
-    def sign_with_nonce(self, k: int, sk: int, msg: bytes) -> Signature:
-        """Same signing method, but takes a nonce as a parameter."""
-        r = G * k
-        e_bytes = sha256(r.to_bytes() + msg).digest()
-        e = int.from_bytes(e_bytes, "big")
-        s = (k - sk * e) % generator.n
-        return Signature(r, s)
 
     def test_nonce_reuse(self):
         # If you reuse the nonce, an attacker can solve for your secret key
@@ -436,7 +440,7 @@ class TestThresholdSigning(unittest.TestCase):
         sig_agg = Signature(r_agg, sig1.s + sig2.s)
         assert verify_schnorr(sig_agg, pk_agg, msg)
 
-    def test_threshold_signing(self):
+    def test_threshold_signing_two(self):
         # 2/3 threshold signing
         t = 2
         signer1 = ThresholdSigner(t)
@@ -446,13 +450,7 @@ class TestThresholdSigning(unittest.TestCase):
 
         # Naive DKG
         idxs = get_signer_idxs(signers)
-        for idx, signer in zip(idxs, signers):
-            partial_shares = [
-                other_signer.compute_partial_share(idx)
-                for other_signer in signers
-                if other_signer != signer
-            ]
-            signer.set_share(idx, partial_shares)
+        distribute_shares(signers)
 
         # Sign with any two of the three signers
         msg = b"Why do cryptographers love bagels?"
@@ -462,6 +460,18 @@ class TestThresholdSigning(unittest.TestCase):
         sig_agg = threshold_sign([signer2, signer3], [idxs[1], idxs[2]], msg)
         assert verify_schnorr(sig_agg, pk_agg, msg)
         sig_agg = threshold_sign([signer1, signer3], [idxs[0], idxs[2]], msg)
+        assert verify_schnorr(sig_agg, pk_agg, msg)
+
+    def test_threshold_signing_many(self):
+        t = random.randrange(3, 10)
+        n = random.randrange(t, 15)
+        signers = [ThresholdSigner(t) for _ in range(n)]
+        idxs = get_signer_idxs(signers)
+        distribute_shares(signers)
+
+        msg = b"Okay I ran out of original jokes"
+        pk_agg = sum((signer.pk for signer in signers), Point.inf())
+        sig_agg = threshold_sign(signers[:t], idxs[:t], msg)
         assert verify_schnorr(sig_agg, pk_agg, msg)
 
 

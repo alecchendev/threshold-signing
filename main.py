@@ -1,4 +1,4 @@
-from typing import Tuple
+from typing import Optional, Tuple
 import unittest
 from dataclasses import dataclass
 import random
@@ -14,10 +14,7 @@ def gcd(a: int, b: int) -> Tuple[int, int, int]:
     """
     Returns (gcd, x, y) s.t. a * x + b * y == gcd
     This function implements the extended Euclidean
-    algorithm and runs in O(log b) in the worst case,
-    taken from Wikipedia.
-
-    Source: Andrej Karpathy
+    algorithm and runs in O(log b) in the worst case.
     """
     old_r, r = a, b
     old_s, s = 1, 0
@@ -31,7 +28,7 @@ def gcd(a: int, b: int) -> Tuple[int, int, int]:
 
 
 def inv(a: int, p: int) -> int:
-    """Find the inverse using extended euclidean algorithm."""
+    """Find the modular multiplicative inverse using extended euclidean algorithm."""
     _divisor, x, _y = gcd(a, p)
     return x % p
 
@@ -73,7 +70,6 @@ class Point:
 
     def __add__(self, other: "Point") -> "Point":
         # Edge cases
-
         # P + 0 = 0 + P
         if self == Point.inf():
             return other
@@ -102,8 +98,9 @@ class Point:
         return Point(self.curve, x, y)
 
     def __mul__(self, k: int) -> "Point":
-        # More efficient way of doing multiplication with large numbers,
-        # i.e. double and add
+        # Multiplication is just adding over and over like in normal arithmetic.
+        # This is just a more efficient way of doing multiplication with
+        # large numbers, i.e. double and add
         assert isinstance(k, int) and k >= 0
         result = Point.inf()
         append = self
@@ -146,57 +143,39 @@ class Signature:
     s: int
 
 
-def sign(sk: int, msg: bytes) -> Signature:
-    """Returns (s, e) where
-    r = k * G
-    e = H(r || msg)
-    s = k - sk * e
-    """
-    k = rand_secret()
-    r = G * k
-    e_bytes = sha256(r.to_bytes() + msg).digest()
-    e = int.from_bytes(e_bytes, "big")
-    s = (k - sk * e) % generator.n
-    return Signature(r, s)
-
-
-def sign_with_nonce(k: int, sk: int, msg: bytes) -> Signature:
-    """Returns (s, e) where
-    r = k * G
-    e = H(r || msg)
-    s = k - sk * e
-    """
-    r = G * k
-    e_bytes = sha256(r.to_bytes() + msg).digest()
-    e = int.from_bytes(e_bytes, "big")
-    s = (k - sk * e) % generator.n
-    return Signature(r, s)
-
-
-def sign_with_nonce_and_agg_nonce(
-    k: int, r_agg: Point, sk: int, msg: bytes
+def sign_schnorr(
+    sk: int, msg: bytes, k: Optional[int] = None, r: Optional[Point] = None
 ) -> Signature:
     """Returns (s, e) where
-    r = k * G
     e = H(r || msg)
     s = k - sk * e
+
+    Args:
+        sk: secret key
+        msg: the message to sign
+        k: a random nonce
+        r: the public nonce (either G * k or a shared nonce)
     """
-    e_bytes = sha256(r_agg.to_bytes() + msg).digest()
+    if k is None:
+        assert r is None
+        k = rand_secret()
+    if r is None:
+        r = G * k
+    e_bytes = sha256(r.to_bytes() + msg).digest()
     e = int.from_bytes(e_bytes, "big")
     s = (k - sk * e) % generator.n
-    return Signature(r_agg, s)
+    return Signature(r, s)
 
 
-def verify(sig: Signature, pk: Point, msg: bytes) -> bool:
+def verify_schnorr(sig: Signature, pk: Point, msg: bytes) -> bool:
     """Returns whether the signature (r, s) is valid with the
     provided public key (pk) for the message, i.e.
     e = H(r || msg)
     G * s + pk * e == r
     """
     # Spelled out:
-    # G * s = G * (k - sk * e)
-    # pk * e = G * (sk * e)
-    # G * s + pk * e = G * (k - sk * e) + G * (sk * e)
+    # G * s + pk * e
+    # = G * (k - sk * e) + (G * sk) * e
     # = G * k = r
     e_bytes = sha256(sig.r.to_bytes() + msg).digest()
     e = int.from_bytes(e_bytes, "big")
@@ -206,18 +185,19 @@ def verify(sig: Signature, pk: Point, msg: bytes) -> bool:
 def sk_from_nonce_reuse(
     msg1: bytes, sig1: Signature, msg2: bytes, sig2: Signature
 ) -> int:
-    assert sig1.r == sig2.r
-    r = sig1.r
-    e1_bytes = sha256(r.to_bytes() + msg1).digest()
-    e1 = int.from_bytes(e1_bytes, "big")
-    e2_bytes = sha256(r.to_bytes() + msg2).digest()
-    e2 = int.from_bytes(e2_bytes, "big")
+    """Solves for the secret key given two signatures that reuse a nonce."""
+    # Spelled out:
     # sig1.s = k - sk * e1
     # sig2.s = k - sk * e2
     # sig1.s - sig2.s = (k - sk * e1) - (k - sk * e2)
     # = sk * e2 - sk * e1
     # = sk * (e2 - e1)
     # sk = (sig1.s - sig2.s) / (e2 - e1)
+    r = sig1.r
+    e1_bytes = sha256(r.to_bytes() + msg1).digest()
+    e1 = int.from_bytes(e1_bytes, "big")
+    e2_bytes = sha256(r.to_bytes() + msg2).digest()
+    e2 = int.from_bytes(e2_bytes, "big")
     sk = (sig1.s - sig2.s) * inv(e2 - e1, generator.n) % generator.n
     return sk
 
@@ -225,6 +205,8 @@ def sk_from_nonce_reuse(
 class TestThresholdSigning(unittest.TestCase):
     def test_curve(self):
         assert secp256k1.check(G.x, G.y)
+        g2 = G + G
+        assert secp256k1.check(g2.x, g2.y)
         assert G * 2 * 3 == G * 6
         sk = rand_secret()
         sk2 = rand_secret()
@@ -235,8 +217,8 @@ class TestThresholdSigning(unittest.TestCase):
         sk = rand_secret()
         pk = G * sk
         msg = b"What do cryptographers do when they sleep?"
-        sig = sign(sk, msg)
-        assert verify(sig, pk, msg)
+        sig = sign_schnorr(sk, msg)
+        assert verify_schnorr(sig, pk, msg)
 
     def sign_with_nonce(self, k: int, sk: int, msg: bytes) -> Signature:
         """Same signing method, but takes a nonce as a parameter."""
@@ -247,17 +229,24 @@ class TestThresholdSigning(unittest.TestCase):
         return Signature(r, s)
 
     def test_nonce_reuse(self):
+        # If you reuse the nonce, an attacker can solve for your secret key
         sk = rand_secret()
         pk = G * sk
-        k = rand_secret()
+        k1 = rand_secret()
         msg1 = b"Hello"
-        sig1 = self.sign_with_nonce(k, sk, msg1)
-        assert verify(sig1, pk, msg1)
+        sig1 = sign_schnorr(sk, msg1, k1)
+        assert verify_schnorr(sig1, pk, msg1)
         msg2 = b"Goodbye"
-        sig2 = self.sign_with_nonce(k, sk, msg2)
-        assert verify(sig2, pk, msg2)
+        sig2 = sign_schnorr(sk, msg2, k1)
+        assert verify_schnorr(sig2, pk, msg2)
         solved_sk = sk_from_nonce_reuse(msg1, sig1, msg2, sig2)
         assert solved_sk == sk
+        # If you don't reuse the nonce, it doesn't work
+        k2 = rand_secret()
+        sig3 = sign_schnorr(sk, msg2, k2)
+        assert verify_schnorr(sig3, pk, msg2)
+        solved_sk = sk_from_nonce_reuse(msg1, sig1, msg2, sig3)
+        assert solved_sk != sk
 
     def test_threshold_signing(self):
         # 2/2 threshold signing
@@ -299,10 +288,10 @@ class TestThresholdSigning(unittest.TestCase):
         r1 = G * k1
         r2 = G * k2
         r_agg = r1 + r2
-        sig1 = sign_with_nonce_and_agg_nonce(k1, r_agg, sk1, msg)
-        sig2 = sign_with_nonce_and_agg_nonce(k2, r_agg, sk2, msg)
+        sig1 = sign_schnorr(sk1, msg, k1, r_agg)
+        sig2 = sign_schnorr(sk2, msg, k2, r_agg)
         sig_agg = Signature(r_agg, sig1.s + sig2.s)
-        assert verify(sig_agg, pk_agg, msg)
+        assert verify_schnorr(sig_agg, pk_agg, msg)
 
         # Signing with the threshold key shares
         k1 = rand_secret()
@@ -310,10 +299,10 @@ class TestThresholdSigning(unittest.TestCase):
         r1 = G * k1
         r2 = G * k2
         r_agg = r1 + r2
-        sig1 = sign_with_nonce_and_agg_nonce(k1, r_agg, lambda1, msg)
-        sig2 = sign_with_nonce_and_agg_nonce(k2, r_agg, lambda2, msg)
+        sig1 = sign_schnorr(lambda1, msg, k1, r_agg)
+        sig2 = sign_schnorr(lambda2, msg, k2, r_agg)
         sig_agg = Signature(r_agg, sig1.s + sig2.s)
-        assert verify(sig_agg, pk_agg, msg)
+        assert verify_schnorr(sig_agg, pk_agg, msg)
 
     def test_threshold_signing2(self):
         # 2/3 threshold signing
@@ -391,12 +380,12 @@ class TestThresholdSigning(unittest.TestCase):
         r1 = G * k1
         r2 = G * k2
         r_agg = r1 + r2
-        sig1 = sign_with_nonce_and_agg_nonce(k1, r_agg, lambda12, msg)
-        sig2 = sign_with_nonce_and_agg_nonce(k2, r_agg, lambda21, msg)
+        sig1 = sign_schnorr(lambda12, msg, k1, r_agg)
+        sig2 = sign_schnorr(lambda21, msg, k2, r_agg)
         sig_agg = Signature(r_agg, sig1.s + sig2.s)
         pk_agg = G * lambda1 + G * lambda2 + G * lambda3
         assert pk_agg == pk1 + pk2 + pk3
-        assert verify(sig_agg, pk_agg, msg)
+        assert verify_schnorr(sig_agg, pk_agg, msg)
 
 
 if __name__ == "__main__":

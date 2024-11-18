@@ -1,4 +1,5 @@
-from typing import Optional, Tuple
+from math import prod
+from typing import Optional, Tuple, List
 import unittest
 from dataclasses import dataclass
 import random
@@ -202,6 +203,83 @@ def sk_from_nonce_reuse(
     return sk
 
 
+def eval_polynomial(coeffs: List[int], x: int) -> int:
+    """Evaluates a polynomial of degree len(coeffs)-1 at x.
+
+    Example:
+    coeffs = [1, 2, 3]
+    eval_polynomial(coeffs, x) = 1x^2 + 2x^1 + 3x^0
+    """
+    return (
+        sum(c * x**i for i, c in zip(reversed(range(len(coeffs))), coeffs))
+        % generator.n
+    )
+
+
+class ThresholdSigner:
+    def __init__(self, t: int, sk: int = rand_secret()):
+        self.t = t
+        self.sk = sk
+        self.pk = G * sk
+        # t - 1 because the last coefficient is our secret key
+        self.coeffs = [rand_secret() for _ in range(t - 1)] + [sk]
+        self.idx: Optional[int] = None
+        self.share: Optional[int] = None
+
+    def compute_partial_share(self, idx: int) -> int:
+        return eval_polynomial(self.coeffs, idx)
+
+    def set_share(self, idx: int, partial_shares: List[int]):
+        self.idx = idx
+        self.share = (
+            self.compute_partial_share(self.idx) + sum(partial_shares)
+        ) % generator.n
+
+    # Post DKG
+
+    def get_share(self) -> int:
+        assert self.idx is not None and self.share is not None
+        return self.share
+
+    def compute_lambda(self, other_idxs: List[int]) -> int:
+        assert self.idx is not None and self.share is not None
+        # Lagrange interpolation: https://en.wikipedia.org/wiki/Lagrange_polynomial
+        return (
+            prod(
+                ((0 - other_idxs[i]) * inv(self.idx - other_idxs[i], generator.n))
+                for i in range(len(other_idxs))
+            )
+            * self.share
+            % generator.n
+        )
+
+
+def get_signer_idxs(signers: List[ThresholdSigner]) -> List[int]:
+    return [
+        idx
+        for _, idx in sorted(zip(signers, [1, 2, 3]), key=lambda x: x[0].pk.to_bytes())
+    ]
+
+
+def threshold_sign(
+    signers: List[ThresholdSigner], signer_idxs: List[int], msg: bytes
+) -> Signature:
+    # TODO: do we need to tweak with our pubkey somewhere?
+    nonces = [rand_secret() for _ in signers]
+    agg_nonce = sum((G * k for k in nonces), Point.inf())
+
+    partial_signatures: List[Signature] = []
+    for idx, signer, nonce in zip(signer_idxs, signers, nonces):
+        other_signer_idxs = [i for i in signer_idxs if i != idx]
+        lambda_curr = signer.compute_lambda(other_signer_idxs)
+        partial_signature = sign_schnorr(lambda_curr, msg, nonce, agg_nonce)
+        partial_signatures.append(partial_signature)
+    sig_agg = Signature(
+        agg_nonce, sum((sig.s for sig in partial_signatures)) % generator.n
+    )
+    return sig_agg
+
+
 class TestThresholdSigning(unittest.TestCase):
     def test_curve(self):
         assert secp256k1.check(G.x, G.y)
@@ -216,7 +294,7 @@ class TestThresholdSigning(unittest.TestCase):
     def test_sign_verify(self):
         sk = rand_secret()
         pk = G * sk
-        msg = b"What do cryptographers do when they sleep?"
+        msg = b"Which cryptography struggled with sleep apnea?"
         sig = sign_schnorr(sk, msg)
         assert verify_schnorr(sig, pk, msg)
 
@@ -248,34 +326,15 @@ class TestThresholdSigning(unittest.TestCase):
         solved_sk = sk_from_nonce_reuse(msg1, sig1, msg2, sig3)
         assert solved_sk != sk
 
-    def test_threshold_signing(self):
-        # 2/2 threshold signing
-        # Kinda pointless to do threshold here but whatever
+    def test_schnorr_multisig(self):
+        # Basic 2-of-2 signing
         sk1 = rand_secret()
         sk2 = rand_secret()
         pk1 = G * sk1
         pk2 = G * sk2
-        m1 = rand_secret()
-        m2 = rand_secret()
-        line1 = lambda x: (m1 * x + sk1) % generator.n
-        line2 = lambda x: (m2 * x + sk2) % generator.n
-        idx1 = 1
-        idx2 = 2
-        y11 = line1(idx1)
-        y12 = line1(idx2)
-        y21 = line2(idx1)
-        y22 = line2(idx2)
-        share1 = y11 + y21
-        share2 = y12 + y22
-        # (x - x_m) / (x_j - x_m) * y_j
-        lambda1 = (0 - idx2) * inv(idx1 - idx2, generator.n) * share1 % generator.n
-        lambda2 = (0 - idx1) * inv(idx2 - idx1, generator.n) * share2 % generator.n
-        sk_agg = (lambda1 + lambda2) % generator.n
-        assert sk_agg == (sk1 + sk2) % generator.n
-        assert lambda1 != sk1 and lambda1 != sk2
-        assert lambda2 != sk1 and lambda2 != sk2
-        pk_agg = G * lambda1 + G * lambda2
-        assert pk_agg == pk1 + pk2
+        sk_agg = (sk1 + sk2) % generator.n
+        pk_agg = pk1 + pk2
+        assert pk_agg == G * sk_agg
 
         # Signing
         # e = H((k1 + k2) || msg)
@@ -293,18 +352,7 @@ class TestThresholdSigning(unittest.TestCase):
         sig_agg = Signature(r_agg, sig1.s + sig2.s)
         assert verify_schnorr(sig_agg, pk_agg, msg)
 
-        # Signing with the threshold key shares
-        k1 = rand_secret()
-        k2 = rand_secret()
-        r1 = G * k1
-        r2 = G * k2
-        r_agg = r1 + r2
-        sig1 = sign_schnorr(lambda1, msg, k1, r_agg)
-        sig2 = sign_schnorr(lambda2, msg, k2, r_agg)
-        sig_agg = Signature(r_agg, sig1.s + sig2.s)
-        assert verify_schnorr(sig_agg, pk_agg, msg)
-
-    def test_threshold_signing2(self):
+    def test_threshold_signing_manual(self):
         # 2/3 threshold signing
         sk1 = rand_secret()
         sk2 = rand_secret()
@@ -312,6 +360,7 @@ class TestThresholdSigning(unittest.TestCase):
         pk1 = G * sk1
         pk2 = G * sk2
         pk3 = G * sk3
+        pk_agg = pk1 + pk2 + pk3
         m1 = rand_secret()
         m2 = rand_secret()
         m3 = rand_secret()
@@ -333,7 +382,9 @@ class TestThresholdSigning(unittest.TestCase):
         share1 = y11 + y21 + y31
         share2 = y12 + y22 + y32
         share3 = y13 + y23 + y33
-        # Rederiving the shared secret
+
+        # Rederiving the shared secret from all shares
+        # Lagrange interpolation: https://en.wikipedia.org/wiki/Lagrange_polynomial
         lambda1 = (
             (
                 (0 - idx2)
@@ -367,13 +418,13 @@ class TestThresholdSigning(unittest.TestCase):
         sk_agg = (lambda1 + lambda2 + lambda3) % generator.n
         assert sk_agg == (sk1 + sk2 + sk3) % generator.n
 
-        # Proof you can do it with only 2 of the 3 shares!
+        # Rederiving the shared secret from only two shares
         lambda12 = (0 - idx2) * inv(idx1 - idx2, generator.n) * share1 % generator.n
         lambda21 = (0 - idx1) * inv(idx2 - idx1, generator.n) * share2 % generator.n
         sk_agg = (lambda12 + lambda21) % generator.n
         assert sk_agg == (sk1 + sk2 + sk3) % generator.n
 
-        # Signing
+        # Signing for the aggregate key with two shares
         msg = b"Hello"
         k1 = rand_secret()
         k2 = rand_secret()
@@ -383,8 +434,34 @@ class TestThresholdSigning(unittest.TestCase):
         sig1 = sign_schnorr(lambda12, msg, k1, r_agg)
         sig2 = sign_schnorr(lambda21, msg, k2, r_agg)
         sig_agg = Signature(r_agg, sig1.s + sig2.s)
-        pk_agg = G * lambda1 + G * lambda2 + G * lambda3
-        assert pk_agg == pk1 + pk2 + pk3
+        assert verify_schnorr(sig_agg, pk_agg, msg)
+
+    def test_threshold_signing(self):
+        # 2/3 threshold signing
+        t = 2
+        signer1 = ThresholdSigner(t)
+        signer2 = ThresholdSigner(t)
+        signer3 = ThresholdSigner(t)
+        signers = [signer1, signer2, signer3]
+
+        # Naive DKG
+        idxs = get_signer_idxs(signers)
+        for idx, signer in zip(idxs, signers):
+            partial_shares = [
+                other_signer.compute_partial_share(idx)
+                for other_signer in signers
+                if other_signer != signer
+            ]
+            signer.set_share(idx, partial_shares)
+
+        # Sign with any two of the three signers
+        msg = b"Why do cryptographers love bagels?"
+        pk_agg = sum((signer.pk for signer in signers), Point.inf())
+        sig_agg = threshold_sign([signer1, signer2], [idxs[0], idxs[1]], msg)
+        assert verify_schnorr(sig_agg, pk_agg, msg)
+        sig_agg = threshold_sign([signer2, signer3], [idxs[1], idxs[2]], msg)
+        assert verify_schnorr(sig_agg, pk_agg, msg)
+        sig_agg = threshold_sign([signer1, signer3], [idxs[0], idxs[2]], msg)
         assert verify_schnorr(sig_agg, pk_agg, msg)
 
 

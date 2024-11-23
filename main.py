@@ -474,6 +474,49 @@ class TestThresholdSigning(unittest.TestCase):
         sig_agg = threshold_sign(signers[:t], idxs[:t], msg)
         assert verify_schnorr(sig_agg, pk_agg, msg)
 
+    def test_adaptor_signatures(self):
+        # Alice
+        sk1 = rand_secret()
+        pk1 = G * sk1
+        t = rand_secret()  # hidden value
+        m = b"Hello"
+        m2 = b"Goodbye"
+
+        k = rand_secret()
+        sig = sign_schnorr(sk1, m, k + t, G * k + G * t)
+        # sig = k + t - H(G * k + G * t || m) * sk1
+        # sig' = k - H(G * k + G * t || m) * sk1
+        # G * sig' = G * k - pk1 * (G * k + G * t || m)
+        sig_prime = (sig.s - t) % generator.n
+        adaptor = (sig_prime, G * k, G * t)
+
+        # Bob
+        assert (
+            G * adaptor[0]
+            + pk1
+            * int.from_bytes(
+                sha256((adaptor[1] + adaptor[2]).to_bytes() + m).digest(), "big"
+            )
+            == adaptor[1]
+        )
+        sk2 = rand_secret()
+        pk2 = G * sk2
+        k2 = rand_secret()
+        sig2 = sign_schnorr(sk2, m2, k2, G * k2 + adaptor[2])
+        # sig2 = k2 - H(G * k2 + G * t || m) * sk2
+        adaptor2 = (sig2.s, G * k2, adaptor[2])
+
+        # Alice
+        sig3 = Signature(adaptor2[1] + adaptor2[2], (sig2.s + t) % generator.n)
+        assert verify_schnorr(sig3, pk2, m2)
+        # Broadcasts
+
+        # Bob solves for t, and gets Alice's signature from earlier adaptor using t
+        t_solved = (sig3.s - sig2.s) % generator.n
+        assert t == t_solved
+        sig4 = Signature(adaptor[1] + adaptor[2], (adaptor[0] + t) % generator.n)
+        assert verify_schnorr(sig4, pk1, m)
+
 
 if __name__ == "__main__":
     unittest.main()
